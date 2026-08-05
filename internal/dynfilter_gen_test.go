@@ -8,13 +8,41 @@ import (
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
 )
 
-// TestGenerateDynamicFilter tests that the code generator produces correct output
-// for queries with emit_dynamic_filter enabled.
 func TestGenerateDynamicFilter(t *testing.T) {
+	cases := []dynamicFilterTest{
+		{
+			name:       "PostgreSQL",
+			engine:     "postgresql",
+			sqlPackage: "pgx/v5",
+			query:      "SELECT id, name, status FROM items\nWHERE name = $1\n  AND status = $2 -- :if @status\nORDER BY\n  id ASC -- :if @id_asc\n  id DESC -- :if @id_desc",
+			queryCall:  "rows, err := q.db.Query(ctx, dynQuery, dynArgs...)",
+		},
+		{
+			name:       "SQLite",
+			engine:     "sqlite",
+			sqlPackage: "database/sql",
+			query:      "SELECT id, name, status FROM items\nWHERE name = ?1\n  AND status = ?2 -- :if @status\nORDER BY\n  id ASC -- :if @id_asc\n  id DESC -- :if @id_desc",
+			queryCall:  "rows, err := q.db.QueryContext(ctx, dynQuery, dynArgs...)",
+			sqlite:     true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testGenerateDynamicFilter(t, tc)
+		})
+	}
+}
+
+type dynamicFilterTest struct {
+	name, engine, sqlPackage, query, queryCall string
+	sqlite                                     bool
+}
+
+func testGenerateDynamicFilter(t *testing.T, tc dynamicFilterTest) {
 	req := &plugin.GenerateRequest{
 		SqlcVersion: "v1.0.0",
 		Settings: &plugin.Settings{
-			Engine: "postgresql",
+			Engine: tc.engine,
 		},
 		Catalog: &plugin.Catalog{
 			DefaultSchema: "public",
@@ -40,7 +68,7 @@ func TestGenerateDynamicFilter(t *testing.T) {
 				Cmd:      ":many",
 				Filename: "query.sql",
 				// Simulated SQL with :if annotations
-				Text: "SELECT id, name, status FROM items\nWHERE name = $1\n  AND status = $2 -- :if @status\nORDER BY\n  id ASC -- :if @id_asc\n  id DESC -- :if @id_desc",
+				Text: tc.query,
 				Params: []*plugin.Parameter{
 					{Number: 1, Column: &plugin.Column{Name: "name", NotNull: true, Type: &plugin.Identifier{Name: "text"}}},
 					{Number: 2, Column: &plugin.Column{Name: "status", NotNull: true, Type: &plugin.Identifier{Name: "text"}}},
@@ -52,11 +80,7 @@ func TestGenerateDynamicFilter(t *testing.T) {
 				},
 			},
 		},
-		PluginOptions: []byte(`{
-			"package": "testpkg",
-			"sql_package": "pgx/v5",
-			"emit_dynamic_filter": true
-		}`),
+		PluginOptions: []byte(`{"package":"testpkg","sql_package":"` + tc.sqlPackage + `","emit_dynamic_filter":true}`),
 		GlobalOptions: []byte(`{}`),
 	}
 
@@ -106,6 +130,10 @@ func TestGenerateDynamicFilter(t *testing.T) {
 		t.Logf("query file:\n%s", queryFile)
 		t.Error("expected .Build( call in generated query method")
 	}
+	if !strings.Contains(queryFile, "dynQuery, dynArgs := _searchItemsDynQ.Build([]any{arg.Name, arg.Status, arg.IdAsc, arg.IdDesc})\n\t"+tc.queryCall) {
+		t.Logf("query file:\n%s", queryFile)
+		t.Error("expected dynamic-filter query and execution to be separate statements")
+	}
 
 	// Verify dynfilter.go contains the core functions
 	if !strings.Contains(dynfilterFile, "func dynCompile(") {
@@ -115,6 +143,10 @@ func TestGenerateDynamicFilter(t *testing.T) {
 	if !strings.Contains(dynfilterFile, "func DynamicSQL(") {
 		t.Logf("dynfilter file:\n%s", dynfilterFile)
 		t.Error("expected DynamicSQL function in dynfilter.go")
+	}
+	if tc.sqlite && !strings.Contains(dynfilterFile, `strings.IndexAny(text, "$?")`) {
+		t.Logf("dynfilter file:\n%s", dynfilterFile)
+		t.Error("expected numbered SQLite placeholders to be supported")
 	}
 
 	// Verify the SQL constant still has -- :if $N markers (used by dynCompile)
@@ -401,4 +433,3 @@ func TestGenerateDynamicFilter_ArrayParam_Single(t *testing.T) {
 	}
 	t.Logf("Generated:\n%s", queryFile)
 }
-

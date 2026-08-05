@@ -1,4 +1,4 @@
-.PHONY: build test example-e2e example-e2e-setup example-e2e-down
+.PHONY: build test example-e2e example-e2e-sqlite example-e2e-setup example-e2e-down
 
 build:
 	go build ./...
@@ -36,3 +36,6 @@ example-e2e: example-e2e-setup
 	EXIT=$$?; \
 	$(MAKE) -C $(CURDIR) example-e2e-down; \
 	exit $$EXIT
+
+example-e2e-sqlite:
+	cd example && go test ./e2e-sqlite/... -count=1 -v
