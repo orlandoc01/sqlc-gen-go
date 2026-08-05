@@ -119,3 +119,15 @@ sql:
           package: dbsqlite
           sql_package: database/sql
           emit_dynamic_filter: true
+
+  - schema: mysql/schema.sql
+    queries: mysql/queries.sql
+    engine: mysql
+    codegen:
+      - out: dbmysql
+        plugin: golang
+        options:
+          package: dbmysql
+          sql_package: database/sql
+          sql_driver: github.com/go-sql-driver/mysql
+          emit_dynamic_filter: true
