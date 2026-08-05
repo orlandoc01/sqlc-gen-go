@@ -300,11 +300,11 @@ cd example
 go test ./test/... -v
 ```
 
-**51 passing test cases** across:
+**54 passing test cases** across:
 
 | Test | Sub-tests | What is covered |
 |---|---|---|
-| `TestDynamicSQL` | 22 | Placeholder remapping, gap handling, ORDER BY clauses, orphaned WHERE/GROUP BY/HAVING cleanup, EXISTS blocks |
+| `TestDynamicSQL` | 25 | Placeholder remapping, gap handling, ORDER BY clauses, orphaned WHERE/GROUP BY/HAVING cleanup, EXISTS blocks |
 | `TestSearchUsers` | 9 | Optional email/phone/date filter combinations on generated search query |
 | `TestSearchUsersOrdered` | 4 | ORDER BY flag combinations |
 | `TestSearchUsersByContact` | 4 | Multi-param optional filter |

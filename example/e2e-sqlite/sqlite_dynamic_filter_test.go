@@ -26,9 +26,9 @@ func TestDynamicFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, row := range [][3]string{
-		{"shared", "first", "shared"},
-		{"shared", "second", "shared"},
-		{"other", "first", "shared"},
+		{"required-a", "first", "required-c"},
+		{"required-a", "second", "required-c"},
+		{"required-a", "first", "other-c"},
 	} {
 		if _, err := db.ExecContext(ctx, "INSERT INTO filter_items (a, b, c) VALUES (?, ?, ?)", row[0], row[1], row[2]); err != nil {
 			t.Fatal(err)
@@ -36,7 +36,7 @@ func TestDynamicFilter(t *testing.T) {
 	}
 
 	q := dbsqlite.New(db)
-	items, err := q.ListFilterItems(ctx, dbsqlite.ListFilterItemsParams{A: "shared", C: "shared"})
+	items, err := q.ListFilterItems(ctx, dbsqlite.ListFilterItemsParams{A: "required-a", C: "required-c"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestDynamicFilter(t *testing.T) {
 	}
 
 	b := "first"
-	items, err = q.ListFilterItems(ctx, dbsqlite.ListFilterItemsParams{A: "shared", B: &b, C: "shared"})
+	items, err = q.ListFilterItems(ctx, dbsqlite.ListFilterItemsParams{A: "required-a", B: &b, C: "required-c"})
 	if err != nil {
 		t.Fatal(err)
 	}
