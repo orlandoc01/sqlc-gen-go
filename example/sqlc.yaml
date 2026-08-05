@@ -109,3 +109,13 @@ sql:
           emit_exported_queries: true
           disable_result_slice_pointers: true
 
+  - schema: sqlite/schema.sql
+    queries: sqlite/queries.sql
+    engine: sqlite
+    codegen:
+      - out: dbsqlite
+        plugin: golang
+        options:
+          package: dbsqlite
+          sql_package: database/sql
+          emit_dynamic_filter: true

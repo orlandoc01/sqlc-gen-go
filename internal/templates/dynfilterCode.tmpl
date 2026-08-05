@@ -1,12 +1,13 @@
 {{define "dynfilterCode"}}
 // dynCompiledSeg is one segment of a pre-compiled dynamic SQL query.
 type dynCompiledSeg struct {
-	// parts splits the segment text at each $N placeholder:
+	// parts splits the segment text at each numbered $N or ?N input placeholder.
+	// Build renders active placeholders as sequential $N output placeholders:
 	//   parts[0] + "$<n>" + parts[1] + "$<n+1>" + ... + parts[K]
 	// len(parts) == len(argNums)+1
 	parts []string
-	// argNums are the 1-based $N SQL parameter numbers in order of appearance.
-	// args[argNums[i]-1] provides the value for the i-th placeholder.
+	// argNums are the 1-based input SQL parameter numbers in order of appearance.
+	// args[argNums[i]-1] provides the value for the corresponding placeholder.
 	argNums []int
 	// condIdxs are 0-based indices into the args slice passed to Build.
 	// All referenced args must be "active" (non-nil pointer / true bool)
@@ -106,14 +107,14 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 // Build applies the pre-compiled filter to args and returns the final SQL
 // and the trimmed args slice. The method is safe to call concurrently.
 //
-// When the same original $N appears more than once in the active segments
-// (e.g. both "name = $1" and "email = $1"), the returned SQL reuses the
-// same renumbered placeholder and the arg is included only once.
+// When the same original input placeholder appears more than once in the
+// active segments, the returned SQL reuses the same output placeholder and
+// includes its arg only once.
 func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 	var b strings.Builder
 	var outArgs []any
 	n := 1
-	argIdxToN := make(map[int]int) // original argIdx (0-based) -> output $N
+	argIdxToN := make(map[int]int) // input argIdx (0-based) -> output $N
 
 	for _, seg := range q.segs {
 		// Check all conditions.
@@ -134,7 +135,7 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 			if i < len(seg.argNums) {
 				argIdx := seg.argNums[i] - 1
 				if existing, ok := argIdxToN[argIdx]; ok {
-					// Same original param already emitted — reuse its placeholder.
+					// Same input parameter already emitted; reuse its output placeholder.
 					b.WriteByte('$')
 					dynWriteInt(&b, existing)
 				} else {
@@ -182,14 +183,15 @@ func dynExtractCondIdxs(line string) (condIdxs []int, cleaned string) {
 	return condIdxs, cleaned
 }
 
-// dynSplitPlaceholders splits text at $N placeholder boundaries.
+// dynSplitPlaceholders splits text at numbered $N and ?N input placeholders.
+// Bare markers are preserved; Build emits sequential $N output placeholders.
 // Returns parts (len = len(argNums)+1) and 1-based argNums.
 func dynSplitPlaceholders(text string) (parts []string, argNums []int) {
-	// Fast path: scan without a Builder when every '$' is followed by digits.
-	// Fall back to a Builder only when a bare '$' (not followed by a digit) is found.
+	// Fast path: scan without a Builder when every placeholder marker is followed by digits.
+	// Fall back to a Builder only when a bare marker is found.
 	var buf *strings.Builder
 	for {
-		i := strings.IndexByte(text, '$')
+		i := strings.IndexAny(text, "$?")
 		if i == -1 {
 			if buf != nil {
 				buf.WriteString(text)
@@ -201,7 +203,7 @@ func dynSplitPlaceholders(text string) (parts []string, argNums []int) {
 			j++
 		}
 		if j == i+1 {
-			// '$' not followed by digit; switch to Builder to preserve the text.
+			// Placeholder marker not followed by digit; preserve the text.
 			if buf == nil {
 				buf = &strings.Builder{}
 			}

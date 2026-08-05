@@ -1,12 +1,14 @@
 package db
 
 import (
-	"example/db"
+	"slices"
 	"testing"
+
+	"example/db"
 )
 
 func TestDynamicSQL(t *testing.T) {
-	t.Run("RemapsPlaceholders", func(t *testing.T) {
+	t.Run("PostgreSQLPlaceholders/NilCondition", func(t *testing.T) {
 		// $1 required, $2 conditional (nil → line removed)
 		query := "SELECT * FROM t\nWHERE a = $1\n  AND b = $2 -- :if $2"
 		var b *string
@@ -36,7 +38,40 @@ func TestDynamicSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("AllConditionsActive", func(t *testing.T) {
+	t.Run("SQLitePlaceholders/NilCondition", func(t *testing.T) {
+		// ?1 required, ?2 conditional removed, ?3 required → ?3 becomes $2.
+		query := "SELECT * FROM t\nWHERE a = ?1\n  AND b = ?2 -- :if $2\n  AND c = ?3"
+		var b *string
+		gotQuery, gotArgs := db.DynamicSQL(query, []any{"a", b, "c"})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE a = $1\n  AND c = $2")
+		if !slices.Equal(gotArgs, []any{"a", "c"}) {
+			t.Errorf("args: got %v, want [a c]", gotArgs)
+		}
+	})
+
+	t.Run("SQLitePlaceholders/NonNilCondition", func(t *testing.T) {
+		b := "active"
+		query := "SELECT * FROM t\nWHERE a = ?1\n  AND b = ?2 -- :if $2\n  AND c = ?3"
+		gotQuery, gotArgs := db.DynamicSQL(query, []any{"a", &b, "c"})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE a = $1\n  AND b = $2\n  AND c = $3")
+		if !slices.Equal(gotArgs, []any{"a", &b, "c"}) {
+			t.Errorf("args: got %v, want [a %v c]", gotArgs, &b)
+		}
+	})
+
+	t.Run("BareQuestionMark", func(t *testing.T) {
+		query := "SELECT * FROM t WHERE json ? 'key' AND a = ?1"
+		gotQuery, gotArgs := db.DynamicSQL(query, []any{"value"})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t WHERE json ? 'key' AND a = $1")
+		if !slices.Equal(gotArgs, []any{"value"}) {
+			t.Errorf("args: got %v, want [value]", gotArgs)
+		}
+	})
+
+	t.Run("PostgreSQLPlaceholders/NonNilCondition", func(t *testing.T) {
 		// All lines kept → placeholders stay sequential, args unchanged
 		status := "active"
 		query := "SELECT * FROM t\nWHERE a = $1\n  AND b = $2 -- :if $2"

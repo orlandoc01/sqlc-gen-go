@@ -293,7 +293,7 @@ Key areas at 100%: `enum.go`, `field.go` (all case-style helpers), `inflection/s
 
 ### Generated code (`example/test/`)
 
-Unit tests for the generated Go code — no database required. Covers `DynamicSQL` SQL-building logic, generated query SQL strings, and dynamic filter / ORDER BY combinations.
+Unit tests for the generated Go code — no database required. Covers `DynamicSQL` SQL-building logic, generated query SQL strings, and dynamic filter / ORDER BY combinations. Dynamic filters accept PostgreSQL `$N` and SQLite numbered `?N` input placeholders; active placeholders are normalized to sequential `$N` output placeholders.
 
 ```sh
 cd example
@@ -330,6 +330,14 @@ make example-e2e
 | `TestSearchUsersWithSameNameAndEmail` | Nil vs non-nil shared-column filter |
 | `TestSearchUsersOrderedByID` | ASC/DESC flag combinations with optional filters |
 | `TestGetUserWithLock` | `FOR UPDATE` / `FOR SHARE` locking |
+
+### SQLite end-to-end (`example/e2e-sqlite/`)
+
+Runs SQLite dynamic filters through `database/sql` without Docker, including optional middle-argument removal and placeholder remapping.
+
+```sh
+make example-e2e-sqlite
+```
 
 ---
 
