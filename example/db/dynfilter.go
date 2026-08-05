@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
+const dynQuestionMarkPlaceholders = false
+
 // dynCompiledSeg is one segment of a pre-compiled dynamic SQL query.
 type dynCompiledSeg struct {
 	// parts splits the segment text at each numbered $N or ?N input placeholder.
-	// Build renders active placeholders as sequential $N output placeholders:
-	//   parts[0] + "$<n>" + parts[1] + "$<n+1>" + ... + parts[K]
+	// Build renders active placeholders as sequential output placeholders.
 	// len(parts) == len(argNums)+1
 	parts []string
 	// argNums are the 1-based input SQL parameter numbers in order of appearance.
@@ -35,12 +36,13 @@ type dynCompiledQuery struct {
 func dynCompile(annotatedSQL string) *dynCompiledQuery {
 	var segs []dynCompiledSeg
 	var staticBuf strings.Builder
+	nextArgNum := 1
 
 	flushStatic := func() {
 		if staticBuf.Len() == 0 {
 			return
 		}
-		parts, argNums := dynSplitPlaceholders(staticBuf.String())
+		parts, argNums := dynSplitPlaceholders(staticBuf.String(), &nextArgNum)
 		segs = append(segs, dynCompiledSeg{parts: parts, argNums: argNums})
 		staticBuf.Reset()
 	}
@@ -80,7 +82,7 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 					}
 					condIdxs, cleaned := dynExtractCondIdxs(nextLine)
 					condIdxs = append([]int{condIdx}, condIdxs...)
-					parts, argNums := dynSplitPlaceholders("\n" + cleaned)
+					parts, argNums := dynSplitPlaceholders("\n"+cleaned, &nextArgNum)
 					segs = append(segs, dynCompiledSeg{
 						parts:    parts,
 						argNums:  argNums,
@@ -94,7 +96,7 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 		// Inline annotation(s): "text -- :if $N [-- :if $M ...]"
 		if condIdxs, cleaned := dynExtractCondIdxs(line); len(condIdxs) > 0 {
 			flushStatic()
-			parts, argNums := dynSplitPlaceholders(sep + cleaned)
+			parts, argNums := dynSplitPlaceholders(sep+cleaned, &nextArgNum)
 			segs = append(segs, dynCompiledSeg{
 				parts:    parts,
 				argNums:  argNums,
@@ -115,14 +117,13 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 // Build applies the pre-compiled filter to args and returns the final SQL
 // and the trimmed args slice. The method is safe to call concurrently.
 //
-// When the same original input placeholder appears more than once in the
-// active segments, the returned SQL reuses the same output placeholder and
-// includes its arg only once.
+// Numbered output placeholders reuse repeated input parameters. MySQL uses
+// positional question-mark placeholders, so repeated parameters are repeated.
 func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 	var b strings.Builder
 	var outArgs []any
 	n := 1
-	argIdxToN := make(map[int]int) // input argIdx (0-based) -> output $N
+	argIdxToNs := make(map[int][]int) // input argIdx (0-based) -> output $N values
 
 	for _, seg := range q.segs {
 		// Check all conditions.
@@ -142,20 +143,31 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 			if before, isSlice := dynSlicePrefix(part); isSlice {
 				b.WriteString(before)
 				argIdx := seg.argNums[i] - 1
-				dynWriteSlice(&b, &outArgs, args[argIdx], &n)
+				if dynQuestionMarkPlaceholders {
+					if argIdx >= 0 && argIdx < len(args) {
+						dynWriteSlice(&b, &outArgs, args[argIdx], &n)
+					} else {
+						b.WriteString("NULL")
+					}
+				} else if existing, ok := argIdxToNs[argIdx]; ok {
+					dynWritePlaceholders(&b, existing)
+				} else if argIdx >= 0 && argIdx < len(args) {
+					argIdxToNs[argIdx] = dynWriteSlice(&b, &outArgs, args[argIdx], &n)
+				} else {
+					b.WriteString("NULL")
+					argIdxToNs[argIdx] = nil
+				}
 				continue
 			}
 			b.WriteString(part)
 			if i < len(seg.argNums) {
 				argIdx := seg.argNums[i] - 1
-				if existing, ok := argIdxToN[argIdx]; ok {
+				if existing, ok := argIdxToNs[argIdx]; ok && !dynQuestionMarkPlaceholders {
 					// Same input parameter already emitted; reuse its output placeholder.
-					b.WriteByte('$')
-					dynWriteInt(&b, existing)
+					dynWritePlaceholder(&b, existing[0])
 				} else {
-					b.WriteByte('$')
-					dynWriteInt(&b, n)
-					argIdxToN[argIdx] = n
+					dynWritePlaceholder(&b, n)
+					argIdxToNs[argIdx] = []int{n}
 					n++
 					if argIdx >= 0 && argIdx < len(args) {
 						outArgs = append(outArgs, args[argIdx])
@@ -168,6 +180,24 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 	return dynFinalizeQuery(b.String()), outArgs
 }
 
+func dynWritePlaceholders(b *strings.Builder, nums []int) {
+	for i, n := range nums {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		dynWritePlaceholder(b, n)
+	}
+}
+
+func dynWritePlaceholder(b *strings.Builder, n int) {
+	if dynQuestionMarkPlaceholders {
+		b.WriteByte('?')
+		return
+	}
+	b.WriteByte('$')
+	dynWriteInt(b, n)
+}
+
 func dynSlicePrefix(part string) (string, bool) {
 	start := strings.LastIndex(part, "/*SLICE:")
 	if start == -1 || !strings.HasSuffix(part, "*/") {
@@ -176,21 +206,23 @@ func dynSlicePrefix(part string) (string, bool) {
 	return part[:start], true
 }
 
-func dynWriteSlice(b *strings.Builder, outArgs *[]any, arg any, n *int) {
+func dynWriteSlice(b *strings.Builder, outArgs *[]any, arg any, n *int) []int {
 	values := reflect.ValueOf(arg)
 	if values.Kind() != reflect.Slice || values.Len() == 0 {
 		b.WriteString("NULL")
-		return
+		return nil
 	}
+	nums := make([]int, values.Len())
 	for i := range values.Len() {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteByte('$')
-		dynWriteInt(b, *n)
+		nums[i] = *n
+		dynWritePlaceholder(b, *n)
 		*n++
 		*outArgs = append(*outArgs, values.Index(i).Interface())
 	}
+	return nums
 }
 
 // dynExtractCondIdxs extracts all " -- :if $N" annotations from line,
@@ -223,9 +255,10 @@ func dynExtractCondIdxs(line string) (condIdxs []int, cleaned string) {
 }
 
 // dynSplitPlaceholders splits text at numbered $N and ?N input placeholders.
-// Bare markers are preserved; Build emits sequential $N output placeholders.
+// For MySQL, bare ? input placeholders are numbered by appearance. Other bare
+// markers are preserved; Build emits driver-appropriate output placeholders.
 // Returns parts (len = len(argNums)+1) and 1-based argNums.
-func dynSplitPlaceholders(text string) (parts []string, argNums []int) {
+func dynSplitPlaceholders(text string, nextArgNum *int) (parts []string, argNums []int) {
 	// Fast path: scan without a Builder when every placeholder marker is followed by digits.
 	// Fall back to a Builder only when a bare marker is found.
 	var buf *strings.Builder
@@ -241,7 +274,7 @@ func dynSplitPlaceholders(text string) (parts []string, argNums []int) {
 		for j < len(text) && text[j] >= '0' && text[j] <= '9' {
 			j++
 		}
-		if j == i+1 {
+		if j == i+1 && !(dynQuestionMarkPlaceholders && text[i] == '?') {
 			// Placeholder marker not followed by digit; preserve the text.
 			if buf == nil {
 				buf = &strings.Builder{}
@@ -250,13 +283,19 @@ func dynSplitPlaceholders(text string) (parts []string, argNums []int) {
 			text = text[i+1:]
 			continue
 		}
-		n := dynParseInt(text[i+1:j], j-i-1)
+		n := *nextArgNum
+		if j > i+1 {
+			n = dynParseInt(text[i+1:j], j-i-1)
+		}
 		if n <= 0 {
 			if buf != nil {
 				buf.WriteString(text[:j])
 			}
 			text = text[j:]
 			continue
+		}
+		if dynQuestionMarkPlaceholders && n >= *nextArgNum {
+			*nextArgNum = n + 1
 		}
 		if buf != nil {
 			buf.WriteString(text[:i])

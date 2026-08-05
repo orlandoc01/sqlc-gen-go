@@ -15,7 +15,7 @@ var ifAnnotationRe = regexp.MustCompile(`--\s*:if\s+[@$]\w+(?:\s+[@$]\w+)*\s*$`)
 // ifParamRe extracts individual @name or $name tokens from an annotation.
 var ifParamRe = regexp.MustCompile(`[@$](\w+)`)
 
-var sqlcSliceRe = regexp.MustCompile(`/\*SLICE:(\w+)\*/\?`)
+var sqlcSliceRe = regexp.MustCompile(`/\*SLICE:([^*]+)\*/\?`)
 
 // parseIfNames returns all param names listed in a :if annotation string.
 func parseIfNames(annotation string) []string {

@@ -233,6 +233,11 @@ func generate(req *plugin.GenerateRequest, options *opts.Options, enums []Enum, 
 		Structs: structs,
 	}
 
+	sqlDriver := parseDriver(options.SqlPackage)
+	if options.SqlDriver != "" {
+		sqlDriver = opts.SQLDriver(options.SqlDriver)
+	}
+
 	tctx := tmplCtx{
 		EmitInterface:             options.EmitInterface,
 		EmitJSONTags:              options.EmitJsonTags,
@@ -245,7 +250,7 @@ func generate(req *plugin.GenerateRequest, options *opts.Options, enums []Enum, 
 		EmitAllEnumValues:         options.EmitAllEnumValues,
 		UsesCopyFrom:              usesCopyFrom(queries),
 		UsesBatch:                 usesBatch(queries),
-		SQLDriver:                 parseDriver(options.SqlPackage),
+		SQLDriver:                 sqlDriver,
 		Q:                         "`",
 		Package:                   options.Package,
 		Enums:                     enums,

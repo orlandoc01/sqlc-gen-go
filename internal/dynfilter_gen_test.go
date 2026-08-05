@@ -25,6 +25,15 @@ func TestGenerateDynamicFilter(t *testing.T) {
 			queryCall:  "rows, err := q.db.QueryContext(ctx, dynQuery, dynArgs...)",
 			sqlite:     true,
 		},
+		{
+			name:       "MySQL",
+			engine:     "mysql",
+			sqlPackage: "database/sql",
+			sqlDriver:  "github.com/go-sql-driver/mysql",
+			query:      "SELECT id, name, status FROM items\nWHERE name = ?\n  AND status = ? -- :if @status\nORDER BY\n  id ASC -- :if @id_asc\n  id DESC -- :if @id_desc",
+			queryCall:  "rows, err := q.db.QueryContext(ctx, dynQuery, dynArgs...)",
+			mysql:      true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -34,8 +43,8 @@ func TestGenerateDynamicFilter(t *testing.T) {
 }
 
 type dynamicFilterTest struct {
-	name, engine, sqlPackage, query, queryCall string
-	sqlite                                     bool
+	name, engine, sqlPackage, sqlDriver, query, queryCall string
+	sqlite, mysql                                         bool
 }
 
 func testGenerateDynamicFilter(t *testing.T, tc dynamicFilterTest) {
@@ -80,7 +89,7 @@ func testGenerateDynamicFilter(t *testing.T, tc dynamicFilterTest) {
 				},
 			},
 		},
-		PluginOptions: []byte(`{"package":"testpkg","sql_package":"` + tc.sqlPackage + `","emit_dynamic_filter":true}`),
+		PluginOptions: []byte(`{"package":"testpkg","sql_package":"` + tc.sqlPackage + `","sql_driver":"` + tc.sqlDriver + `","emit_dynamic_filter":true}`),
 		GlobalOptions: []byte(`{}`),
 	}
 
@@ -147,6 +156,9 @@ func testGenerateDynamicFilter(t *testing.T, tc dynamicFilterTest) {
 	if tc.sqlite && !strings.Contains(dynfilterFile, `strings.IndexAny(text, "$?")`) {
 		t.Logf("dynfilter file:\n%s", dynfilterFile)
 		t.Error("expected numbered SQLite placeholders to be supported")
+	}
+	if tc.mysql && !strings.Contains(dynfilterFile, "const dynQuestionMarkPlaceholders = true") {
+		t.Errorf("expected MySQL dynamic SQL to use question-mark placeholders:\n%s", dynfilterFile)
 	}
 
 	// Verify the SQL constant still has -- :if $N markers (used by dynCompile)
@@ -449,10 +461,10 @@ func TestGenerateDynamicFilter_SqlcSlice(t *testing.T) {
 			Name:     "SearchItems",
 			Cmd:      ":many",
 			Filename: "query.sql",
-			Text:     "SELECT id, name FROM items\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?) -- :if @ids",
+			Text:     "SELECT id, name FROM items\nWHERE name = ?1\n  AND id IN (/*SLICE:team-ids*/?) -- :if @name",
 			Params: []*plugin.Parameter{
 				{Number: 1, Column: &plugin.Column{Name: "name", NotNull: true, Type: &plugin.Identifier{Name: "text"}}},
-				{Number: 2, Column: &plugin.Column{Name: "ids", IsSqlcSlice: true, NotNull: true, Type: &plugin.Identifier{Name: "bigint"}}},
+				{Number: 2, Column: &plugin.Column{Name: "team-ids", IsSqlcSlice: true, NotNull: true, Type: &plugin.Identifier{Name: "bigint"}}},
 			},
 			Columns: []*plugin.Column{
 				{Name: "id", NotNull: true, Type: &plugin.Identifier{Name: "bigint"}},
@@ -475,7 +487,7 @@ func TestGenerateDynamicFilter_SqlcSlice(t *testing.T) {
 		if strings.Contains(output, `"strings"`) {
 			t.Errorf("dynamic sqlc.slice query should not import strings:\n%s", output)
 		}
-		if !strings.Contains(output, "/*SLICE:ids*/?2) -- :if $2") {
+		if !strings.Contains(output, "/*SLICE:team-ids*/?2) -- :if $1") {
 			t.Errorf("dynamic sqlc.slice marker should retain its parameter number:\n%s", output)
 		}
 		return
