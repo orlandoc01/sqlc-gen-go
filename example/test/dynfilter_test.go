@@ -71,6 +71,27 @@ func TestDynamicSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("SqlcSlice/NilCondition", func(t *testing.T) {
+		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
+		var ids []int64
+		gotQuery, gotArgs := db.DynamicSQL(query, []any{"active", ids})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1")
+		if !slices.Equal(gotArgs, []any{"active"}) {
+			t.Errorf("args: got %v, want [active]", gotArgs)
+		}
+	})
+
+	t.Run("SqlcSlice/ActiveCondition", func(t *testing.T) {
+		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
+		gotQuery, gotArgs := db.DynamicSQL(query, []any{"active", []int64{7, 9}})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1\n  AND id IN ($2,$3)")
+		if !slices.Equal(gotArgs, []any{"active", int64(7), int64(9)}) {
+			t.Errorf("args: got %v, want [active 7 9]", gotArgs)
+		}
+	})
+
 	t.Run("PostgreSQLPlaceholders/NonNilCondition", func(t *testing.T) {
 		// All lines kept → placeholders stay sequential, args unchanged
 		status := "active"

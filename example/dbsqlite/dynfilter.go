@@ -139,6 +139,12 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 
 		// Write text parts interleaved with sequential $N placeholders.
 		for i, part := range seg.parts {
+			if before, isSlice := dynSlicePrefix(part); isSlice {
+				b.WriteString(before)
+				argIdx := seg.argNums[i] - 1
+				dynWriteSlice(&b, &outArgs, args[argIdx], &n)
+				continue
+			}
 			b.WriteString(part)
 			if i < len(seg.argNums) {
 				argIdx := seg.argNums[i] - 1
@@ -160,6 +166,31 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 	}
 
 	return dynFinalizeQuery(b.String()), outArgs
+}
+
+func dynSlicePrefix(part string) (string, bool) {
+	start := strings.LastIndex(part, "/*SLICE:")
+	if start == -1 || !strings.HasSuffix(part, "*/") {
+		return part, false
+	}
+	return part[:start], true
+}
+
+func dynWriteSlice(b *strings.Builder, outArgs *[]any, arg any, n *int) {
+	values := reflect.ValueOf(arg)
+	if values.Kind() != reflect.Slice || values.Len() == 0 {
+		b.WriteString("NULL")
+		return
+	}
+	for i := range values.Len() {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('$')
+		dynWriteInt(b, *n)
+		*n++
+		*outArgs = append(*outArgs, values.Index(i).Interface())
+	}
 }
 
 // dynExtractCondIdxs extracts all " -- :if $N" annotations from line,

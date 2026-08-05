@@ -433,3 +433,52 @@ func TestGenerateDynamicFilter_ArrayParam_Single(t *testing.T) {
 	}
 	t.Logf("Generated:\n%s", queryFile)
 }
+
+func TestGenerateDynamicFilter_SqlcSlice(t *testing.T) {
+	req := &plugin.GenerateRequest{
+		SqlcVersion: "v1.0.0",
+		Settings:    &plugin.Settings{Engine: "sqlite"},
+		Catalog: &plugin.Catalog{DefaultSchema: "main", Schemas: []*plugin.Schema{{Name: "main", Tables: []*plugin.Table{{
+			Rel: &plugin.Identifier{Schema: "main", Name: "items"},
+			Columns: []*plugin.Column{
+				{Name: "id", NotNull: true, Type: &plugin.Identifier{Name: "bigint"}},
+				{Name: "name", NotNull: true, Type: &plugin.Identifier{Name: "text"}},
+			},
+		}}}}},
+		Queries: []*plugin.Query{{
+			Name:     "SearchItems",
+			Cmd:      ":many",
+			Filename: "query.sql",
+			Text:     "SELECT id, name FROM items\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?) -- :if @ids",
+			Params: []*plugin.Parameter{
+				{Number: 1, Column: &plugin.Column{Name: "name", NotNull: true, Type: &plugin.Identifier{Name: "text"}}},
+				{Number: 2, Column: &plugin.Column{Name: "ids", IsSqlcSlice: true, NotNull: true, Type: &plugin.Identifier{Name: "bigint"}}},
+			},
+			Columns: []*plugin.Column{
+				{Name: "id", NotNull: true, Type: &plugin.Identifier{Name: "bigint"}},
+				{Name: "name", NotNull: true, Type: &plugin.Identifier{Name: "text"}},
+			},
+		}},
+		PluginOptions: []byte(`{"package":"testpkg","sql_package":"database/sql","emit_dynamic_filter":true}`),
+		GlobalOptions: []byte(`{}`),
+	}
+
+	resp, err := Generate(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range resp.Files {
+		if f.Name != "query.sql.go" {
+			continue
+		}
+		output := string(f.Contents)
+		if strings.Contains(output, `"strings"`) {
+			t.Errorf("dynamic sqlc.slice query should not import strings:\n%s", output)
+		}
+		if !strings.Contains(output, "/*SLICE:ids*/?2) -- :if $2") {
+			t.Errorf("dynamic sqlc.slice marker should retain its parameter number:\n%s", output)
+		}
+		return
+	}
+	t.Fatal("query.sql.go not generated")
+}
