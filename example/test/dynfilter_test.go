@@ -71,7 +71,7 @@ func TestDynamicSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("SqlcSlice/NilCondition", func(t *testing.T) {
+	t.Run("SQLiteSqlcSlice/NilCondition", func(t *testing.T) {
 		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
 		var ids []int64
 		gotQuery, gotArgs := db.DynamicSQL(query, []any{"active", ids})
@@ -82,7 +82,7 @@ func TestDynamicSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("SqlcSlice/ActiveCondition", func(t *testing.T) {
+	t.Run("SQLiteSqlcSlice/ActiveCondition", func(t *testing.T) {
 		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
 		gotQuery, gotArgs := db.DynamicSQL(query, []any{"active", []int64{7, 9}})
 
@@ -112,7 +112,7 @@ func TestDynamicSQL(t *testing.T) {
 		}
 	})
 
-	t.Run("SqlcSlice/MissingArgument", func(t *testing.T) {
+	t.Run("SQLiteSqlcSlice/MissingArgument", func(t *testing.T) {
 		query := "SELECT * FROM t WHERE id IN (/*SLICE:ids*/?2) -- :if $1"
 		gotQuery, gotArgs := db.DynamicSQL(query, []any{true})
 
