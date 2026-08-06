@@ -21,6 +21,7 @@ type tmplCtx struct {
 	Q           string
 	Package     string
 	SQLDriver   opts.SQLDriver
+	Engine      string
 	Enums       []Enum
 	Structs     []Struct
 	GoQueries   []Query
@@ -251,6 +252,7 @@ func generate(req *plugin.GenerateRequest, options *opts.Options, enums []Enum, 
 		UsesCopyFrom:              usesCopyFrom(queries),
 		UsesBatch:                 usesBatch(queries),
 		SQLDriver:                 sqlDriver,
+		Engine:                    req.GetSettings().GetEngine(),
 		Q:                         "`",
 		Package:                   options.Package,
 		Enums:                     enums,
