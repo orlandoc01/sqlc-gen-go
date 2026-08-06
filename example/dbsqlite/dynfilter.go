@@ -9,6 +9,12 @@ import (
 
 const dynQuestionMarkPlaceholders = false
 
+// dynBracketIdentifiers is true for engines where [name] is a quoted identifier
+// (SQLite) rather than a subscript such as PostgreSQL's arr[$1]. It controls
+// whether the lexer treats a bracketed span as opaque when scanning for bind
+// markers.
+const dynBracketIdentifiers = true
+
 // dynCompiledSeg is one segment of a pre-compiled dynamic SQL query.
 type dynCompiledSeg struct {
 	// parts splits the segment text at each numbered $N or ?N input placeholder.
@@ -228,7 +234,7 @@ func dynWriteSlice(b *strings.Builder, outArgs *[]any, arg any, n *int) []int {
 // dynExtractCondIdxs extracts all " -- :if $N" annotations from line,
 // returning the 0-based condition indices and the cleaned line text.
 func dynExtractCondIdxs(line string) (condIdxs []int, cleaned string) {
-	idx := strings.Index(line, " -- :if $")
+	idx := dynAnnotationStart(line)
 	if idx == -1 {
 		return nil, line
 	}
@@ -254,65 +260,150 @@ func dynExtractCondIdxs(line string) (condIdxs []int, cleaned string) {
 	return condIdxs, cleaned
 }
 
-// dynSplitPlaceholders splits text at numbered $N and ?N input placeholders.
-// For MySQL, bare ? input placeholders are numbered by appearance. Other bare
-// markers are preserved; Build emits driver-appropriate output placeholders.
-// Returns parts (len = len(argNums)+1) and 1-based argNums.
+// dynAnnotationStart returns the index of the leading space of the first
+// " -- :if $N" annotation in line that lies in SQL-code context, or -1 if there
+// is none. String literals, quoted identifiers, and block comments are skipped
+// so marker-looking text inside them (e.g. '... -- :if $1') is never mistaken
+// for an annotation. Line comments are intentionally transparent: a manual
+// "-- note" written before the generated "-- :if $N" marker must not hide it.
+func dynAnnotationStart(line string) int {
+	const marker = " -- :if $"
+	inLineComment := false
+	i := 0
+	for i < len(line) {
+		if strings.HasPrefix(line[i:], marker) {
+			return i
+		}
+		if inLineComment {
+			i++
+			continue
+		}
+		if line[i] == '-' && i+1 < len(line) && line[i+1] == '-' {
+			// Everything to end of line is now comment text; stop parsing
+			// strings/identifiers so their delimiters do not swallow the marker.
+			inLineComment = true
+			i += 2
+			continue
+		}
+		if j := dynSkipQuotedOrBlock(line, i); j > i {
+			i = j
+			continue
+		}
+		i++
+	}
+	return -1
+}
+
+// dynSplitPlaceholders splits text at numbered $N and ?N input placeholders that
+// appear in SQL-code context. For MySQL, bare ? input placeholders are numbered
+// by appearance. Bare markers and any markers inside string literals, quoted
+// identifiers, or comments are preserved verbatim; Build emits driver-appropriate
+// output placeholders. Returns parts (len = len(argNums)+1) and 1-based argNums.
 func dynSplitPlaceholders(text string, nextArgNum *int) (parts []string, argNums []int) {
-	// Fast path: scan without a Builder when every placeholder marker is followed by digits.
-	// Fall back to a Builder only when a bare marker is found.
-	var buf *strings.Builder
-	for {
-		i := strings.IndexAny(text, "$?")
-		if i == -1 {
-			if buf != nil {
-				buf.WriteString(text)
-			}
-			break
+	partStart := 0
+	i := 0
+	for i < len(text) {
+		// Skip string literals, quoted identifiers, and comments verbatim; they
+		// stay inside the current part so a marker within them is never rewritten.
+		if k := dynSkipToken(text, i); k > i {
+			i = k
+			continue
+		}
+		c := text[i]
+		if c != '$' && c != '?' {
+			i++
+			continue
 		}
 		j := i + 1
 		for j < len(text) && text[j] >= '0' && text[j] <= '9' {
 			j++
 		}
-		if j == i+1 && !(dynQuestionMarkPlaceholders && text[i] == '?') {
-			// Placeholder marker not followed by digit; preserve the text.
-			if buf == nil {
-				buf = &strings.Builder{}
-			}
-			buf.WriteString(text[:i+1])
-			text = text[i+1:]
+		n := 0
+		switch {
+		case j > i+1:
+			n = dynParseInt(text[i+1:j], j-i-1)
+		case dynQuestionMarkPlaceholders && c == '?':
+			n = *nextArgNum
+		default:
+			// Bare marker in code context (PostgreSQL's '?' operator or a lone
+			// '$'): not a bind placeholder, keep it in the current part.
+			i = j
 			continue
 		}
-		n := *nextArgNum
-		if j > i+1 {
-			n = dynParseInt(text[i+1:j], j-i-1)
-		}
 		if n <= 0 {
-			if buf != nil {
-				buf.WriteString(text[:j])
-			}
-			text = text[j:]
+			i = j
 			continue
 		}
 		if dynQuestionMarkPlaceholders && n >= *nextArgNum {
 			*nextArgNum = n + 1
 		}
-		if buf != nil {
-			buf.WriteString(text[:i])
-			parts = append(parts, buf.String())
-			buf.Reset()
-		} else {
-			parts = append(parts, text[:i])
-		}
+		parts = append(parts, text[partStart:i])
 		argNums = append(argNums, n)
-		text = text[j:]
+		partStart = j
+		i = j
 	}
-	if buf != nil {
-		parts = append(parts, buf.String())
-	} else {
-		parts = append(parts, text)
-	}
+	parts = append(parts, text[partStart:])
 	return parts, argNums
+}
+
+// dynSkipToken reports the index just past a SQL string literal, quoted
+// identifier, or comment (line or block) beginning at text[i]. It returns i
+// unchanged when text[i] does not begin one, so the caller advances by a byte.
+func dynSkipToken(text string, i int) int {
+	if text[i] == '-' && i+1 < len(text) && text[i+1] == '-' {
+		if j := strings.IndexByte(text[i:], '\n'); j >= 0 {
+			return i + j
+		}
+		return len(text)
+	}
+	return dynSkipQuotedOrBlock(text, i)
+}
+
+// dynSkipQuotedOrBlock skips a string literal, quoted identifier, or block
+// comment beginning at text[i], returning i unchanged for anything else. Line
+// comments are handled by dynSkipToken so callers scanning for annotations can
+// keep them transparent.
+func dynSkipQuotedOrBlock(text string, i int) int {
+	switch text[i] {
+	case '\'':
+		return dynSkipQuoted(text, i, '\'')
+	case '"':
+		return dynSkipQuoted(text, i, '"')
+	case '`':
+		return dynSkipQuoted(text, i, '`')
+	case '[':
+		if dynBracketIdentifiers {
+			if j := strings.IndexByte(text[i+1:], ']'); j >= 0 {
+				return i + 1 + j + 1
+			}
+			return len(text)
+		}
+	case '/':
+		if i+1 < len(text) && text[i+1] == '*' {
+			if j := strings.Index(text[i+2:], "*/"); j >= 0 {
+				return i + 2 + j + 2
+			}
+			return len(text)
+		}
+	}
+	return i
+}
+
+// dynSkipQuoted skips a span delimited by q starting at text[i] (text[i] == q).
+// The SQL doubling escape (” inside '...', "" inside "...", etc.) keeps the
+// span open. Returns len(text) for an unterminated span.
+func dynSkipQuoted(text string, i int, q byte) int {
+	for j := i + 1; j < len(text); j++ {
+		if text[j] != q {
+			continue
+		}
+		if j+1 < len(text) && text[j+1] == q {
+			j++ // doubled delimiter escape: consume both, stay open
+			continue
+		}
+		return j + 1
+	}
+	return len(text)
 }
 
 // dynFinalizeQuery cleans up the output SQL after conditional lines have been

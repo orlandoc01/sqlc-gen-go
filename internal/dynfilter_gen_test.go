@@ -153,9 +153,13 @@ func testGenerateDynamicFilter(t *testing.T, tc dynamicFilterTest) {
 		t.Logf("dynfilter file:\n%s", dynfilterFile)
 		t.Error("expected DynamicSQL function in dynfilter.go")
 	}
-	if tc.sqlite && !strings.Contains(dynfilterFile, `strings.IndexAny(text, "$?")`) {
+	if tc.sqlite && !strings.Contains(dynfilterFile, "const dynBracketIdentifiers = true") {
 		t.Logf("dynfilter file:\n%s", dynfilterFile)
-		t.Error("expected numbered SQLite placeholders to be supported")
+		t.Error("expected SQLite dynamic SQL to treat [name] as a quoted identifier")
+	}
+	if !tc.sqlite && !strings.Contains(dynfilterFile, "const dynBracketIdentifiers = false") {
+		t.Logf("dynfilter file:\n%s", dynfilterFile)
+		t.Error("expected non-SQLite dynamic SQL to treat [ ] as a subscript, not an identifier")
 	}
 	if tc.mysql && !strings.Contains(dynfilterFile, "const dynQuestionMarkPlaceholders = true") {
 		t.Errorf("expected MySQL dynamic SQL to use question-mark placeholders:\n%s", dynfilterFile)
