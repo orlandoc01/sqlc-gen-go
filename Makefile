@@ -32,7 +32,7 @@ example-e2e-down:
 	docker compose -f $(CURDIR)/example/e2e-setup/docker-compose.yml down
 
 example-e2e: example-e2e-setup
-	cd example && go test ./e2e/... -v; \
+	cd example && go test ./e2e/... ./e2e-mysql/... -count=1 -v; \
 	EXIT=$$?; \
 	$(MAKE) -C $(CURDIR) example-e2e-down; \
 	exit $$EXIT

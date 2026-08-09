@@ -370,8 +370,8 @@ func TestSearchUsersByIDs(t *testing.T) {
 		}
 	})
 
-	t.Run("EmptySlice_NoMatch", func(t *testing.T) {
-		// empty (non-nil) slice → condition active with empty set → no rows
+	t.Run("EmptySlice_SkipsCondition", func(t *testing.T) {
+		// empty slice → "no values supplied" → clause skipped, same as nil
 		users, err := q.SearchUsersByIDs(ctx, conn, db.SearchUsersByIDsParams{
 			Name: "alice",
 			Ids:  []int64{},
@@ -379,8 +379,8 @@ func TestSearchUsersByIDs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(users) != 0 {
-			t.Errorf("got %d users, want 0 for empty id list", len(users))
+		if len(users) != 2 {
+			t.Errorf("got %d users, want 2 for empty id list (clause skipped)", len(users))
 		}
 	})
 
