@@ -91,4 +91,4 @@ emit_tracing:
 
 ### Module name
 
-`github.com/orlandoc01/sqlc-gen-g` (forked from `github.com/vtuanjs/sqlc-gen-go`, which itself was forked from `github.com/sqlc-dev/sqlc-gen-go`)
+`github.com/vtuanjs/sqlc-gen-go` (forked from `github.com/sqlc-dev/sqlc-gen-go`)
