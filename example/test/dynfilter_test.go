@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"example/db"
+	"example/dbsqlite"
 )
 
 func TestDynamicSQL(t *testing.T) {
@@ -42,7 +43,7 @@ func TestDynamicSQL(t *testing.T) {
 		// ?1 required, ?2 conditional removed, ?3 required → ?3 becomes $2.
 		query := "SELECT * FROM t\nWHERE a = ?1\n  AND b = ?2 -- :if $2\n  AND c = ?3"
 		var b *string
-		gotQuery, gotArgs := db.DynamicSQL(query, []any{"a", b, "c"})
+		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"a", b, "c"})
 
 		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE a = $1\n  AND c = $2")
 		if !slices.Equal(gotArgs, []any{"a", "c"}) {
@@ -53,7 +54,7 @@ func TestDynamicSQL(t *testing.T) {
 	t.Run("SQLitePlaceholders/NonNilCondition", func(t *testing.T) {
 		b := "active"
 		query := "SELECT * FROM t\nWHERE a = ?1\n  AND b = ?2 -- :if $2\n  AND c = ?3"
-		gotQuery, gotArgs := db.DynamicSQL(query, []any{"a", &b, "c"})
+		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"a", &b, "c"})
 
 		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE a = $1\n  AND b = $2\n  AND c = $3")
 		if !slices.Equal(gotArgs, []any{"a", &b, "c"}) {
@@ -62,10 +63,12 @@ func TestDynamicSQL(t *testing.T) {
 	})
 
 	t.Run("BareQuestionMark", func(t *testing.T) {
-		query := "SELECT * FROM t WHERE json ? 'key' AND a = ?1"
+		// PostgreSQL '?' is operator text, never a bind marker — with or
+		// without an adjacent digit — so both survive untouched.
+		query := "SELECT * FROM t WHERE json ? 'key' AND data?1 = 'x' AND a = $1"
 		gotQuery, gotArgs := db.DynamicSQL(query, []any{"value"})
 
-		assertSQL(t, gotQuery, "SELECT * FROM t WHERE json ? 'key' AND a = $1")
+		assertSQL(t, gotQuery, "SELECT * FROM t WHERE json ? 'key' AND data?1 = 'x' AND a = $1")
 		if !slices.Equal(gotArgs, []any{"value"}) {
 			t.Errorf("args: got %v, want [value]", gotArgs)
 		}
@@ -74,7 +77,19 @@ func TestDynamicSQL(t *testing.T) {
 	t.Run("SQLiteSqlcSlice/NilCondition", func(t *testing.T) {
 		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
 		var ids []int64
-		gotQuery, gotArgs := db.DynamicSQL(query, []any{"active", ids})
+		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"active", ids})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1")
+		if !slices.Equal(gotArgs, []any{"active"}) {
+			t.Errorf("args: got %v, want [active]", gotArgs)
+		}
+	})
+
+	t.Run("SQLiteSqlcSlice/EmptyCondition", func(t *testing.T) {
+		// Empty means "no values supplied": the :if-gated clause is skipped,
+		// same as nil — an empty allow-list must not silently match zero rows.
+		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
+		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"active", []int64{}})
 
 		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1")
 		if !slices.Equal(gotArgs, []any{"active"}) {
@@ -84,7 +99,7 @@ func TestDynamicSQL(t *testing.T) {
 
 	t.Run("SQLiteSqlcSlice/ActiveCondition", func(t *testing.T) {
 		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
-		gotQuery, gotArgs := db.DynamicSQL(query, []any{"active", []int64{7, 9}})
+		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"active", []int64{7, 9}})
 
 		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1\n  AND id IN ($2,$3)")
 		if !slices.Equal(gotArgs, []any{"active", int64(7), int64(9)}) {

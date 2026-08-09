@@ -1,11 +1,27 @@
 {{define "dynfilterCode"}}
-const dynQuestionMarkPlaceholders = {{.SQLDriver.IsGoSQLDriverMySQL}}
+// Engine/driver-specific lexing and output rules, fixed at generation time.
+
+// dynQuestionMarkPlaceholders is true for MySQL's positional protocol: Build
+// emits '?' output placeholders and bare '?' input markers are numbered by
+// order of appearance.
+const dynQuestionMarkPlaceholders = {{or .SQLDriver.IsGoSQLDriverMySQL (eq .Engine "mysql")}}
+
+// dynNumberedQuestionMarks is true for engines whose SQL text carries numbered
+// ?N input markers (SQLite ?N parameters; MySQL sqlc.slice markers numbered at
+// generation time). PostgreSQL keeps '?' strictly as operator text.
+const dynNumberedQuestionMarks = {{or (eq .Engine "sqlite") (eq .Engine "mysql") .SQLDriver.IsGoSQLDriverMySQL}}
 
 // dynBracketIdentifiers is true for engines where [name] is a quoted identifier
-// (SQLite) rather than a subscript such as PostgreSQL's arr[$1]. It controls
-// whether the lexer treats a bracketed span as opaque when scanning for bind
-// markers.
+// (SQLite) rather than a subscript such as PostgreSQL's arr[$1].
 const dynBracketIdentifiers = {{eq .Engine "sqlite"}}
+
+// dynPostgresDialect enables PostgreSQL-specific lexing: dollar-quoted strings
+// ($$...$$ / $tag$...$tag$), E'...' escape strings, and nested block comments.
+const dynPostgresDialect = {{eq .Engine "postgresql"}}
+
+// dynBackslashStringEscapes is true when a backslash escapes the next character
+// inside '...' and "..." literals (MySQL's default sql_mode).
+const dynBackslashStringEscapes = {{or .SQLDriver.IsGoSQLDriverMySQL (eq .Engine "mysql")}}
 
 // dynCompiledSeg is one segment of a pre-compiled dynamic SQL query.
 type dynCompiledSeg struct {
@@ -47,6 +63,7 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 
 	rest := annotatedSQL
 	firstLine := true
+	var lex dynLexState
 
 	for rest != "" {
 		var line string
@@ -60,6 +77,17 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 		if firstLine {
 			sep = ""
 			firstLine = false
+		}
+
+		// A line that begins inside a string literal, dollar-quoted string, or
+		// block comment left open by a previous line is continuation text: any
+		// annotation-shaped text on it is string/comment content, so the line
+		// goes straight to the static buffer unscanned.
+		if lex.open() {
+			lex = dynLineEndState(line, lex)
+			staticBuf.WriteString(sep)
+			staticBuf.WriteString(line)
+			continue
 		}
 
 		trimmed := strings.TrimSpace(line)
@@ -80,6 +108,7 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 					}
 					condIdxs, cleaned := dynExtractCondIdxs(nextLine)
 					condIdxs = append([]int{condIdx}, condIdxs...)
+					lex = dynLineEndState(cleaned, lex)
 					parts, argNums := dynSplitPlaceholders("\n"+cleaned, &nextArgNum)
 					segs = append(segs, dynCompiledSeg{
 						parts:    parts,
@@ -94,6 +123,7 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 		// Inline annotation(s): "text -- :if $N [-- :if $M ...]"
 		if condIdxs, cleaned := dynExtractCondIdxs(line); len(condIdxs) > 0 {
 			flushStatic()
+			lex = dynLineEndState(cleaned, lex)
 			parts, argNums := dynSplitPlaceholders(sep+cleaned, &nextArgNum)
 			segs = append(segs, dynCompiledSeg{
 				parts:    parts,
@@ -104,12 +134,104 @@ func dynCompile(annotatedSQL string) *dynCompiledQuery {
 		}
 
 		// Unconditional line: accumulate into the static buffer.
+		lex = dynLineEndState(line, lex)
 		staticBuf.WriteString(sep)
 		staticBuf.WriteString(line)
 	}
 
 	flushStatic()
 	return &dynCompiledQuery{segs: segs}
+}
+
+// dynLexState is the lexical construct left open at the end of a source line,
+// carried across lines so continuation text is never scanned for markers.
+type dynLexState struct {
+	quote     byte   // open quoted span: '\'', '"', '`' or '[' (0 = none)
+	backslash bool   // backslash escapes apply inside the open quote
+	comment   int    // open block-comment depth
+	dollar    string // open dollar-quote delimiter (e.g. "$tag$"), "" = none
+}
+
+func (s dynLexState) open() bool {
+	return s.quote != 0 || s.comment > 0 || s.dollar != ""
+}
+
+// dynLineEndState scans one line and returns the lexical state open at its
+// end. Line comments never carry across lines, so "-- ..." ends the scan.
+func dynLineEndState(line string, st dynLexState) dynLexState {
+	i := 0
+	for i < len(line) {
+		switch {
+		case st.dollar != "":
+			j := strings.Index(line[i:], st.dollar)
+			if j < 0 {
+				return st
+			}
+			i += j + len(st.dollar)
+			st.dollar = ""
+		case st.comment > 0:
+			for i < len(line) && st.comment > 0 {
+				switch {
+				case dynPostgresDialect && i+1 < len(line) && line[i] == '/' && line[i+1] == '*':
+					st.comment++
+					i += 2
+				case i+1 < len(line) && line[i] == '*' && line[i+1] == '/':
+					st.comment--
+					i += 2
+				default:
+					i++
+				}
+			}
+			if st.comment > 0 {
+				return st
+			}
+		case st.quote == '[':
+			j := strings.IndexByte(line[i:], ']')
+			if j < 0 {
+				return st
+			}
+			i += j + 1
+			st.quote = 0
+		case st.quote != 0:
+			j, closed := dynQuoteEnd(line, i, st.quote, st.backslash)
+			if !closed {
+				return st
+			}
+			i = j
+			st.quote = 0
+		default:
+			c := line[i]
+			if c == '-' && i+1 < len(line) && line[i+1] == '-' {
+				return st
+			}
+			if c == '/' && i+1 < len(line) && line[i+1] == '*' {
+				st.comment = 1
+				i += 2
+				continue
+			}
+			if c == '\'' || c == '"' || c == '`' {
+				st.quote = c
+				st.backslash = c != '`' && (dynBackslashStringEscapes ||
+					(dynPostgresDialect && c == '\'' && dynEscapeStringPrefix(line, i)))
+				i++
+				continue
+			}
+			if c == '[' && dynBracketIdentifiers {
+				st.quote = '['
+				i++
+				continue
+			}
+			if c == '$' && dynPostgresDialect {
+				if d := dynDollarDelim(line, i); d != "" {
+					st.dollar = d
+					i += len(d)
+					continue
+				}
+			}
+			i++
+		}
+	}
+	return st
 }
 
 // Build applies the pre-compiled filter to args and returns the final SQL
@@ -121,7 +243,14 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 	var b strings.Builder
 	var outArgs []any
 	n := 1
-	argIdxToNs := make(map[int][]int) // input argIdx (0-based) -> output $N values
+	// Numbered-placeholder drivers reuse one output placeholder per repeated
+	// input parameter; MySQL is positional, so repeats are re-emitted and no
+	// reuse bookkeeping is kept at all.
+	var argIdxToN map[int]int      // input argIdx (0-based) -> output $N
+	var sliceIdxToNs map[int][]int // input argIdx -> expanded slice output $Ns
+	if !dynQuestionMarkPlaceholders {
+		argIdxToN = make(map[int]int)
+	}
 
 	for _, seg := range q.segs {
 		// Check all conditions.
@@ -136,38 +265,46 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 			continue
 		}
 
-		// Write text parts interleaved with sequential $N placeholders.
+		// Write text parts interleaved with driver-appropriate placeholders.
 		for i, part := range seg.parts {
-			if before, isSlice := dynSlicePrefix(part); isSlice {
-				b.WriteString(before)
+			if before, isSlice := dynSlicePrefix(part); isSlice && i < len(seg.argNums) {
 				argIdx := seg.argNums[i] - 1
-				if dynQuestionMarkPlaceholders {
-					if argIdx >= 0 && argIdx < len(args) {
-						dynWriteSlice(&b, &outArgs, args[argIdx], &n)
-					} else {
-						b.WriteString("NULL")
-					}
-				} else if existing, ok := argIdxToNs[argIdx]; ok {
-					dynWritePlaceholders(&b, existing)
-				} else if argIdx >= 0 && argIdx < len(args) {
-					argIdxToNs[argIdx] = dynWriteSlice(&b, &outArgs, args[argIdx], &n)
-				} else {
+				if argIdx >= len(args) {
+					b.WriteString(before)
 					b.WriteString("NULL")
-					argIdxToNs[argIdx] = nil
+					continue
 				}
-				continue
+				if v := reflect.ValueOf(args[argIdx]); v.Kind() == reflect.Slice {
+					b.WriteString(before)
+					if dynQuestionMarkPlaceholders {
+						dynWriteSlice(&b, &outArgs, v, &n)
+					} else if existing, ok := sliceIdxToNs[argIdx]; ok {
+						// Same slice already expanded; replay its placeholders.
+						dynWritePlaceholders(&b, existing)
+					} else {
+						if sliceIdxToNs == nil {
+							sliceIdxToNs = make(map[int][]int)
+						}
+						sliceIdxToNs[argIdx] = dynWriteSlice(&b, &outArgs, v, &n)
+					}
+					continue
+				}
+				// The arg is not a slice: the "/*SLICE:...*/" text is ordinary
+				// comment content, so keep it and bind a scalar placeholder.
 			}
 			b.WriteString(part)
 			if i < len(seg.argNums) {
 				argIdx := seg.argNums[i] - 1
-				if existing, ok := argIdxToNs[argIdx]; ok && !dynQuestionMarkPlaceholders {
+				if existing, ok := argIdxToN[argIdx]; ok {
 					// Same input parameter already emitted; reuse its output placeholder.
-					dynWritePlaceholder(&b, existing[0])
+					dynWritePlaceholder(&b, existing)
 				} else {
 					dynWritePlaceholder(&b, n)
-					argIdxToNs[argIdx] = []int{n}
+					if argIdxToN != nil {
+						argIdxToN[argIdx] = n
+					}
 					n++
-					if argIdx >= 0 && argIdx < len(args) {
+					if argIdx < len(args) {
 						outArgs = append(outArgs, args[argIdx])
 					}
 				}
@@ -178,7 +315,13 @@ func (q *dynCompiledQuery) Build(args []any) (string, []any) {
 	return dynFinalizeQuery(b.String()), outArgs
 }
 
+// dynWritePlaceholders replays the placeholders of an already-expanded slice.
+// A nil list means the slice rendered as NULL; replay NULL, not nothing.
 func dynWritePlaceholders(b *strings.Builder, nums []int) {
+	if len(nums) == 0 {
+		b.WriteString("NULL")
+		return
+	}
 	for i, n := range nums {
 		if i > 0 {
 			b.WriteByte(',')
@@ -204,14 +347,17 @@ func dynSlicePrefix(part string) (string, bool) {
 	return part[:start], true
 }
 
-func dynWriteSlice(b *strings.Builder, outArgs *[]any, arg any, n *int) []int {
-	values := reflect.ValueOf(arg)
-	if values.Kind() != reflect.Slice || values.Len() == 0 {
+// dynWriteSlice expands a slice arg into comma-separated placeholders and
+// returns their output numbers. Empty slices render as NULL (matching sqlc's
+// non-dynamic sqlc.slice() expansion) and return nil.
+func dynWriteSlice(b *strings.Builder, outArgs *[]any, values reflect.Value, n *int) []int {
+	ln := values.Len()
+	if ln == 0 {
 		b.WriteString("NULL")
 		return nil
 	}
-	nums := make([]int, values.Len())
-	for i := range values.Len() {
+	nums := make([]int, ln)
+	for i := range ln {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -288,9 +434,11 @@ func dynAnnotationStart(line string) int {
 
 // dynSplitPlaceholders splits text at numbered $N and ?N input placeholders that
 // appear in SQL-code context. For MySQL, bare ? input placeholders are numbered
-// by appearance. Bare markers and any markers inside string literals, quoted
-// identifiers, or comments are preserved verbatim; Build emits driver-appropriate
-// output placeholders. Returns parts (len = len(argNums)+1) and 1-based argNums.
+// by appearance; numbered ?N markers are only recognized on engines that use
+// them (SQLite, MySQL). Bare markers and any markers inside string literals,
+// quoted identifiers, or comments are preserved verbatim; Build emits
+// driver-appropriate output placeholders.
+// Returns parts (len = len(argNums)+1) and 1-based argNums.
 func dynSplitPlaceholders(text string, nextArgNum *int) (parts []string, argNums []int) {
 	partStart := 0
 	i := 0
@@ -312,13 +460,13 @@ func dynSplitPlaceholders(text string, nextArgNum *int) (parts []string, argNums
 		}
 		n := 0
 		switch {
-		case j > i+1:
+		case j > i+1 && (c == '$' || dynNumberedQuestionMarks):
 			n = dynParseInt(text[i+1:j], j-i-1)
 		case dynQuestionMarkPlaceholders && c == '?':
 			n = *nextArgNum
 		default:
-			// Bare marker in code context (PostgreSQL's '?' operator or a lone
-			// '$'): not a bind placeholder, keep it in the current part.
+			// Bare '$', PostgreSQL's '?' operators, or ?N text on an engine
+			// without numbered ? parameters: not a bind placeholder.
 			i = j
 			continue
 		}
@@ -351,18 +499,23 @@ func dynSkipToken(text string, i int) int {
 	return dynSkipQuotedOrBlock(text, i)
 }
 
-// dynSkipQuotedOrBlock skips a string literal, quoted identifier, or block
-// comment beginning at text[i], returning i unchanged for anything else. Line
-// comments are handled by dynSkipToken so callers scanning for annotations can
-// keep them transparent.
+// dynSkipQuotedOrBlock skips a string literal, quoted identifier, dollar-quoted
+// string, or block comment beginning at text[i], returning i unchanged for
+// anything else. Line comments are handled by dynSkipToken so callers scanning
+// for annotations can keep them transparent.
 func dynSkipQuotedOrBlock(text string, i int) int {
-	switch text[i] {
+	switch c := text[i]; c {
 	case '\'':
-		return dynSkipQuoted(text, i, '\'')
+		esc := dynBackslashStringEscapes ||
+			(dynPostgresDialect && dynEscapeStringPrefix(text, i))
+		j, _ := dynQuoteEnd(text, i+1, c, esc)
+		return j
 	case '"':
-		return dynSkipQuoted(text, i, '"')
+		j, _ := dynQuoteEnd(text, i+1, c, dynBackslashStringEscapes)
+		return j
 	case '`':
-		return dynSkipQuoted(text, i, '`')
+		j, _ := dynQuoteEnd(text, i+1, c, false)
+		return j
 	case '[':
 		if dynBracketIdentifiers {
 			if j := strings.IndexByte(text[i+1:], ']'); j >= 0 {
@@ -370,30 +523,100 @@ func dynSkipQuotedOrBlock(text string, i int) int {
 			}
 			return len(text)
 		}
+	case '$':
+		if dynPostgresDialect {
+			if d := dynDollarDelim(text, i); d != "" {
+				if j := strings.Index(text[i+len(d):], d); j >= 0 {
+					return i + len(d) + j + len(d)
+				}
+				return len(text)
+			}
+		}
 	case '/':
 		if i+1 < len(text) && text[i+1] == '*' {
-			if j := strings.Index(text[i+2:], "*/"); j >= 0 {
-				return i + 2 + j + 2
-			}
-			return len(text)
+			return dynSkipBlockComment(text, i)
 		}
 	}
 	return i
 }
 
-// dynSkipQuoted skips a span delimited by q starting at text[i] (text[i] == q).
-// The SQL doubling escape ('' inside '...', "" inside "...", etc.) keeps the
-// span open. Returns len(text) for an unterminated span.
-func dynSkipQuoted(text string, i int, q byte) int {
-	for j := i + 1; j < len(text); j++ {
-		if text[j] != q {
+// dynQuoteEnd scans from i (already inside a span quoted by q) to its closing
+// delimiter. The SQL doubling escape keeps the span open; when backslash is
+// set (MySQL strings, PostgreSQL E'' strings), a backslash escapes the next
+// byte. Returns the index just past the close and whether the span closed.
+func dynQuoteEnd(text string, i int, q byte, backslash bool) (int, bool) {
+	for j := i; j < len(text); j++ {
+		c := text[j]
+		if backslash && c == '\\' {
+			j++
+			continue
+		}
+		if c != q {
 			continue
 		}
 		if j+1 < len(text) && text[j+1] == q {
 			j++ // doubled delimiter escape: consume both, stay open
 			continue
 		}
-		return j + 1
+		return j + 1, true
+	}
+	return len(text), false
+}
+
+// dynEscapeStringPrefix reports whether the quote at text[i] is opened by a
+// PostgreSQL E'...' escape-string prefix (an E/e that is itself not the tail
+// of a longer identifier).
+func dynEscapeStringPrefix(text string, i int) bool {
+	if i == 0 || (text[i-1] != 'e' && text[i-1] != 'E') {
+		return false
+	}
+	if i == 1 {
+		return true
+	}
+	p := text[i-2]
+	return !(p == '_' || p == '$' ||
+		(p >= '0' && p <= '9') || (p >= 'a' && p <= 'z') || (p >= 'A' && p <= 'Z'))
+}
+
+// dynDollarDelim returns the PostgreSQL dollar-quote delimiter starting at
+// text[i] ("$$" or "$tag$"), or "" when text[i] does not open one (e.g. the
+// bind placeholder $1 — tags cannot start with a digit).
+func dynDollarDelim(text string, i int) string {
+	for j := i + 1; j < len(text); j++ {
+		c := text[j]
+		if c == '$' {
+			return text[i : j+1]
+		}
+		ident := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(j > i+1 && c >= '0' && c <= '9')
+		if !ident {
+			return ""
+		}
+	}
+	return ""
+}
+
+// dynSkipBlockComment returns the index just past the block comment starting
+// at text[i] (text[i:i+2] == "/*"). PostgreSQL block comments nest; other
+// engines end at the first "*/". Unterminated comments run to end of text.
+func dynSkipBlockComment(text string, i int) int {
+	depth := 0
+	for j := i; j < len(text); j++ {
+		if j+1 >= len(text) {
+			break
+		}
+		if text[j] == '/' && text[j+1] == '*' && (dynPostgresDialect || depth == 0) {
+			depth++
+			j++
+			continue
+		}
+		if text[j] == '*' && text[j+1] == '/' {
+			depth--
+			j++
+			if depth == 0 {
+				return j + 1
+			}
+		}
 	}
 	return len(text)
 }
@@ -464,9 +687,10 @@ func CompileDynSQL(annotatedSQL string) *DynSQL {
 // For each annotated line, it checks args[N-1] (N is 1-based, matching $N):
 //   - nil pointer → skip the line
 //   - false bool  → skip the line
+//   - nil or empty slice → skip the line
 //   - otherwise   → keep the line
 //
-// After filtering, remaining $N placeholders are renumbered sequentially and
+// After filtering, remaining placeholders are renumbered sequentially and
 // the args slice is trimmed to match, so the query is always valid.
 func DynamicSQL(query string, args []any) (string, []any) {
 	return dynCompile(query).Build(args)
@@ -527,8 +751,11 @@ func dynArgActive(arg any) bool {
 	}
 	v := reflect.ValueOf(arg)
 	switch v.Kind() {
-	case reflect.Ptr, reflect.Interface, reflect.Slice:
+	case reflect.Ptr, reflect.Interface:
 		return !v.IsNil()
+	case reflect.Slice:
+		// Empty means "no values supplied": skip the clause, same as nil.
+		return v.Len() > 0
 	default:
 		return true
 	}

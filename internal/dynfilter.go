@@ -70,8 +70,6 @@ type FlagParam struct {
 //	-- :if @b                          (block: applies to next line)
 //	AND b = $2
 func ParseDynFilter(sql string, params []*plugin.Parameter) (*DynFilterInfo, error) {
-	sql = numberSqlcSlices(sql, params)
-
 	// Build map: column name -> param number (1-based)
 	paramByName := make(map[string]int32)
 	for _, p := range params {
@@ -79,6 +77,8 @@ func ParseDynFilter(sql string, params []*plugin.Parameter) (*DynFilterInfo, err
 			paramByName[p.Column.Name] = p.Number
 		}
 	}
+
+	sql = numberSqlcSlices(sql, paramByName)
 
 	lines := strings.Split(sql, "\n")
 
@@ -261,16 +261,16 @@ func ParseDynFilter(sql string, params []*plugin.Parameter) (*DynFilterInfo, err
 	}, nil
 }
 
-func numberSqlcSlices(sql string, params []*plugin.Parameter) string {
-	paramNumbers := make(map[string]int32, len(params))
-	for _, p := range params {
-		if p.Column.Name != "" {
-			paramNumbers[p.Column.Name] = p.Number
-		}
-	}
+func numberSqlcSlices(sql string, paramByName map[string]int32) string {
 	return sqlcSliceRe.ReplaceAllStringFunc(sql, func(marker string) string {
 		name := sqlcSliceRe.FindStringSubmatch(marker)[1]
-		return fmt.Sprintf("/*SLICE:%s*/?%d", name, paramNumbers[name])
+		n, ok := paramByName[name]
+		if !ok {
+			// Unknown slice name: leave the marker untouched rather than
+			// emitting an unresolvable ?0 placeholder.
+			return marker
+		}
+		return fmt.Sprintf("/*SLICE:%s*/?%d", name, n)
 	})
 }
 

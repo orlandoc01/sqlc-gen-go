@@ -278,7 +278,6 @@ func generate(req *plugin.GenerateRequest, options *opts.Options, enums []Enum, 
 		if err := checkNoTimesForMySQLCopyFrom(queries); err != nil {
 			return nil, err
 		}
-		tctx.SQLDriver = opts.SQLDriverGoSQLDriverMySQL
 	}
 
 	if tctx.UsesBatch && !tctx.SQLDriver.IsPGX() {

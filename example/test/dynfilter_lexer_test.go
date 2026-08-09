@@ -111,4 +111,86 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 			t.Errorf("args: got %v, want [x]", args)
 		}
 	})
+
+	t.Run("MySQLBackslashEscapedQuote", func(t *testing.T) {
+		// MySQL's default sql_mode escapes quotes with a backslash; the string
+		// must not swallow the rest of the line, so the annotation after it is
+		// honored and the ? placeholder is counted.
+		query := "SELECT a FROM t\nWHERE cond = 1\n  AND name = 'O\\'Brien' AND status = ? -- :if $1"
+		sql, args := dbmysql.DynamicSQL(query, []any{"x"})
+		assertSQL(t, sql, "SELECT a FROM t\nWHERE cond = 1\n  AND name = 'O\\'Brien' AND status = ?")
+		if !slices.Equal(args, []any{"x"}) {
+			t.Errorf("args: got %v, want [x]", args)
+		}
+
+		sql, args = dbmysql.DynamicSQL(query, []any{nil})
+		assertSQL(t, sql, "SELECT a FROM t\nWHERE cond = 1")
+		if len(args) != 0 {
+			t.Errorf("args: got %v, want none", args)
+		}
+	})
+
+	t.Run("PostgresDollarQuotedString", func(t *testing.T) {
+		// $N-looking text inside a dollar-quoted literal is string content: it
+		// must survive renumbering untouched when an earlier placeholder drops.
+		query := "SELECT a FROM t\nWHERE 1 = 1\n  AND b = $1 -- :if $1\n  AND note = $$costs $2 up$$ AND c = $2"
+		sql, args := db.DynamicSQL(query, []any{nil, "c"})
+		assertSQL(t, sql, "SELECT a FROM t\nWHERE 1 = 1\n  AND note = $$costs $2 up$$ AND c = $1")
+		if !slices.Equal(args, []any{"c"}) {
+			t.Errorf("args: got %v, want [c]", args)
+		}
+	})
+
+	t.Run("PostgresDollarTagAnnotationImmune", func(t *testing.T) {
+		// A tagged dollar quote hides annotation-shaped text from the scanner.
+		query := "SELECT $tag$fake -- :if $9$tag$ FROM t WHERE a = $1"
+		sql, args := db.DynamicSQL(query, []any{"x"})
+		assertSQL(t, sql, "SELECT $tag$fake -- :if $9$tag$ FROM t WHERE a = $1")
+		if !slices.Equal(args, []any{"x"}) {
+			t.Errorf("args: got %v, want [x]", args)
+		}
+	})
+
+	t.Run("PostgresEscapeString", func(t *testing.T) {
+		// E'...' strings use backslash escapes: the \' stays inside the literal.
+		query := "SELECT a FROM t WHERE note = E'it\\'s $2' AND a = $1"
+		sql, args := db.DynamicSQL(query, []any{"x"})
+		assertSQL(t, sql, "SELECT a FROM t WHERE note = E'it\\'s $2' AND a = $1")
+		if !slices.Equal(args, []any{"x"}) {
+			t.Errorf("args: got %v, want [x]", args)
+		}
+	})
+
+	t.Run("PostgresNestedBlockComment", func(t *testing.T) {
+		// PostgreSQL block comments nest; text after an inner close is still
+		// comment, so the annotation there must be ignored and nothing dropped.
+		query := "SELECT a /* outer /* inner */ note -- :if $1 */ FROM t WHERE a = $1"
+		sql, args := db.DynamicSQL(query, []any{"x"})
+		assertSQL(t, sql, "SELECT a /* outer /* inner */ note -- :if $1 */ FROM t WHERE a = $1")
+		if !slices.Equal(args, []any{"x"}) {
+			t.Errorf("args: got %v, want [x]", args)
+		}
+	})
+
+	t.Run("MultiLineStringLiteral", func(t *testing.T) {
+		// A string literal spanning lines: annotation-shaped text on the
+		// continuation line is string content, never a real annotation.
+		query := "SELECT * FROM t\nWHERE note = 'hello\nworld -- :if $1' AND active = $2"
+		sql, args := db.DynamicSQL(query, []any{nil, "act"})
+		assertSQL(t, sql, "SELECT * FROM t\nWHERE note = 'hello\nworld -- :if $1' AND active = $1")
+		if !slices.Equal(args, []any{"act"}) {
+			t.Errorf("args: got %v, want [act]", args)
+		}
+	})
+
+	t.Run("MultiLineStringFakeBlockAnnotation", func(t *testing.T) {
+		// A continuation line reading exactly "-- :if $1" is string content and
+		// must not become a block annotation that truncates the query.
+		query := "SELECT * FROM t\nWHERE x = 'abc\n-- :if $1\ndef' AND y = $2"
+		sql, args := db.DynamicSQL(query, []any{nil, "world"})
+		assertSQL(t, sql, "SELECT * FROM t\nWHERE x = 'abc\n-- :if $1\ndef' AND y = $1")
+		if !slices.Equal(args, []any{"world"}) {
+			t.Errorf("args: got %v, want [world]", args)
+		}
+	})
 }

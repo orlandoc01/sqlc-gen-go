@@ -34,6 +34,16 @@ func TestGenerateDynamicFilter(t *testing.T) {
 			queryCall:  "rows, err := q.db.QueryContext(ctx, dynQuery, dynArgs...)",
 			mysql:      true,
 		},
+		{
+			// No sql_driver option: the engine alone must select question-mark
+			// placeholders, or every dynamic query breaks at runtime.
+			name:       "MySQLEngineOnly",
+			engine:     "mysql",
+			sqlPackage: "database/sql",
+			query:      "SELECT id, name, status FROM items\nWHERE name = ?\n  AND status = ? -- :if @status\nORDER BY\n  id ASC -- :if @id_asc\n  id DESC -- :if @id_desc",
+			queryCall:  "rows, err := q.db.QueryContext(ctx, dynQuery, dynArgs...)",
+			mysql:      true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
