@@ -77,14 +77,14 @@ options:
           type: "Decimal"
 
 sql:
-  - schema: schema.sql
-    queries: queries/
+  - schema: postgres/schema.sql
+    queries: postgres/queries/
     engine: postgresql
     codegen:
-      - out: db
+      - out: dbpostgres
         plugin: golang
         options:
-          package: db
+          package: dbpostgres
           sql_package: "pgx/v5"
           emit_pointers_for_null_types: true
           emit_empty_slices: false

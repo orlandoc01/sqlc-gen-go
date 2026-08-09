@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"example/db"
+	"example/dbpostgres"
 	"example/dbmysql"
 	"example/dbsqlite"
 )
@@ -14,14 +14,14 @@ import (
 // never inside string literals, quoted identifiers, or comments. Each case
 // asserts both the final SQL and the final arguments.
 //
-// db.DynamicSQL uses the PostgreSQL runtime ($N output, [ ] is a subscript);
+// dbpostgres.DynamicSQL uses the PostgreSQL runtime ($N output, [ ] is a subscript);
 // dbsqlite/dbmysql exercise the SQLite bracket and MySQL backtick identifiers.
 func TestDynamicSQL_LexicalContext(t *testing.T) {
 	t.Run("SingleQuotedMarkers", func(t *testing.T) {
 		// '?1' and '$2' are string constants and must survive untouched; only the
 		// real $1 outside the strings is a placeholder.
 		query := "SELECT note FROM t WHERE note = '?1' OR tag = '$2' OR a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT note FROM t WHERE note = '?1' OR tag = '$2' OR a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -31,7 +31,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 	t.Run("EscapedQuote", func(t *testing.T) {
 		// The doubled '' keeps the literal open, so ?1 stays inside the string.
 		query := "SELECT note FROM t WHERE note = 'it''s ?1' AND a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT note FROM t WHERE note = 'it''s ?1' AND a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -42,7 +42,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 		// A trailing "-- ..." comment (not a :if annotation) is preserved, and its
 		// ?2/$3 are not counted as arguments.
 		query := "SELECT a FROM t\nWHERE a = $1 -- drop ?2 and $3"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT a FROM t\nWHERE a = $1 -- drop ?2 and $3")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -51,7 +51,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 
 	t.Run("BlockComment", func(t *testing.T) {
 		query := "SELECT /* $2 and ?3 */ a FROM t WHERE a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT /* $2 and ?3 */ a FROM t WHERE a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -61,7 +61,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 	t.Run("DoubleQuotedIdentifier", func(t *testing.T) {
 		// $2 is part of the quoted column name, not a placeholder.
 		query := `SELECT "weird$2col" FROM t WHERE a = $1`
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, `SELECT "weird$2col" FROM t WHERE a = $1`)
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -73,7 +73,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 		// line or make it conditional. A nil first arg would drop the line if the
 		// annotation were (wrongly) honored.
 		query := "SELECT a FROM t\nWHERE note = 'x -- :if $1 y' AND a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT a FROM t\nWHERE note = 'x -- :if $1 y' AND a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -83,7 +83,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 	t.Run("PostgresBracketIsSubscript", func(t *testing.T) {
 		// PostgreSQL [ ] is an array subscript, so $1 inside it is a real bind.
 		query := "SELECT tags[$1] FROM t WHERE a = $2"
-		sql, args := db.DynamicSQL(query, []any{int64(3), "x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{int64(3), "x"})
 		assertSQL(t, sql, "SELECT tags[$1] FROM t WHERE a = $2")
 		if !slices.Equal(args, []any{int64(3), "x"}) {
 			t.Errorf("args: got %v, want [3 x]", args)
@@ -134,7 +134,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 		// $N-looking text inside a dollar-quoted literal is string content: it
 		// must survive renumbering untouched when an earlier placeholder drops.
 		query := "SELECT a FROM t\nWHERE 1 = 1\n  AND b = $1 -- :if $1\n  AND note = $$costs $2 up$$ AND c = $2"
-		sql, args := db.DynamicSQL(query, []any{nil, "c"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{nil, "c"})
 		assertSQL(t, sql, "SELECT a FROM t\nWHERE 1 = 1\n  AND note = $$costs $2 up$$ AND c = $1")
 		if !slices.Equal(args, []any{"c"}) {
 			t.Errorf("args: got %v, want [c]", args)
@@ -144,7 +144,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 	t.Run("PostgresDollarTagAnnotationImmune", func(t *testing.T) {
 		// A tagged dollar quote hides annotation-shaped text from the scanner.
 		query := "SELECT $tag$fake -- :if $9$tag$ FROM t WHERE a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT $tag$fake -- :if $9$tag$ FROM t WHERE a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -154,7 +154,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 	t.Run("PostgresEscapeString", func(t *testing.T) {
 		// E'...' strings use backslash escapes: the \' stays inside the literal.
 		query := "SELECT a FROM t WHERE note = E'it\\'s $2' AND a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT a FROM t WHERE note = E'it\\'s $2' AND a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -165,7 +165,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 		// PostgreSQL block comments nest; text after an inner close is still
 		// comment, so the annotation there must be ignored and nothing dropped.
 		query := "SELECT a /* outer /* inner */ note -- :if $1 */ FROM t WHERE a = $1"
-		sql, args := db.DynamicSQL(query, []any{"x"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{"x"})
 		assertSQL(t, sql, "SELECT a /* outer /* inner */ note -- :if $1 */ FROM t WHERE a = $1")
 		if !slices.Equal(args, []any{"x"}) {
 			t.Errorf("args: got %v, want [x]", args)
@@ -176,7 +176,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 		// A string literal spanning lines: annotation-shaped text on the
 		// continuation line is string content, never a real annotation.
 		query := "SELECT * FROM t\nWHERE note = 'hello\nworld -- :if $1' AND active = $2"
-		sql, args := db.DynamicSQL(query, []any{nil, "act"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{nil, "act"})
 		assertSQL(t, sql, "SELECT * FROM t\nWHERE note = 'hello\nworld -- :if $1' AND active = $1")
 		if !slices.Equal(args, []any{"act"}) {
 			t.Errorf("args: got %v, want [act]", args)
@@ -187,7 +187,7 @@ func TestDynamicSQL_LexicalContext(t *testing.T) {
 		// A continuation line reading exactly "-- :if $1" is string content and
 		// must not become a block annotation that truncates the query.
 		query := "SELECT * FROM t\nWHERE x = 'abc\n-- :if $1\ndef' AND y = $2"
-		sql, args := db.DynamicSQL(query, []any{nil, "world"})
+		sql, args := dbpostgres.DynamicSQL(query, []any{nil, "world"})
 		assertSQL(t, sql, "SELECT * FROM t\nWHERE x = 'abc\n-- :if $1\ndef' AND y = $1")
 		if !slices.Equal(args, []any{"world"}) {
 			t.Errorf("args: got %v, want [world]", args)

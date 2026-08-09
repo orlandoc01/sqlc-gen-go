@@ -335,13 +335,20 @@ go test ./test/... -v
 | `TestSearchUsersOrderedByID` | 4 | ASC/DESC flag combinations with optional filters |
 | `TestGetUserWithLock` | 2 | `FOR UPDATE` / `FOR SHARE` SQL generation |
 
-### End-to-end (`example/e2e/`)
+### End-to-end
 
-Integration tests that run queries against a real PostgreSQL database (`postgres://postgres:postgres@localhost:6432/sqlc-test`). Covers the same scenarios as the unit tests but validates actual query execution and result mapping.
+Each engine has its own e2e package (`example/e2e-postgres/`, `example/e2e-mysql/`, `example/e2e-sqlite/`) testing its generated package (`dbpostgres`, `dbmysql`, `dbsqlite`). `make example-e2e` runs all three; per-engine targets exist too:
 
 ```sh
-make example-e2e
+make example-e2e            # all engines (postgres + mysql via docker compose)
+make example-e2e-postgres
+make example-e2e-mysql
+make example-e2e-sqlite     # in-memory, no docker
 ```
+
+### PostgreSQL end-to-end (`example/e2e-postgres/`)
+
+Integration tests that run queries against a real PostgreSQL database (`postgres://postgres:postgres@localhost:6432/sqlc-test`). Covers the same scenarios as the unit tests but validates actual query execution and result mapping.
 
 | Test | What is covered |
 |---|---|
@@ -352,13 +359,13 @@ make example-e2e
 | `TestSearchUsersOrderedByID` | ASC/DESC flag combinations with optional filters |
 | `TestGetUserWithLock` | `FOR UPDATE` / `FOR SHARE` locking |
 
+### MySQL end-to-end (`example/e2e-mysql/`)
+
+Runs the generated dynamic-filter query against a real MySQL 8 (`root:mysql@tcp(localhost:6603)/sqlc-test`), covering nil, populated, and empty `sqlc.slice()` values.
+
 ### SQLite end-to-end (`example/e2e-sqlite/`)
 
 Runs SQLite dynamic filters through `database/sql` without Docker, including optional middle-argument removal and placeholder remapping.
-
-```sh
-make example-e2e-sqlite
-```
 
 ---
 
