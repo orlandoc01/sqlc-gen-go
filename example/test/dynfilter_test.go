@@ -86,10 +86,22 @@ func TestDynamicSQL(t *testing.T) {
 	})
 
 	t.Run("SQLiteSqlcSlice/EmptyCondition", func(t *testing.T) {
-		// Empty means "no values supplied": the :if-gated clause is skipped,
-		// same as nil — an empty allow-list must not silently match zero rows.
+		// Empty non-nil keeps the :if-gated clause and renders NULL: an empty
+		// allow-list filters by the empty set (fail-closed), unlike nil.
 		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
 		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"active", []int64{}})
+
+		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1\n  AND id IN (NULL)")
+		if !slices.Equal(gotArgs, []any{"active"}) {
+			t.Errorf("args: got %v, want [active]", gotArgs)
+		}
+	})
+
+	t.Run("SQLiteSqlcSlice/NilableSliceEmptyCondition", func(t *testing.T) {
+		// NilableSlice converts empty to nil for callers who want "no values
+		// supplied" to mean "don't filter": the clause is skipped.
+		query := "SELECT * FROM t\nWHERE name = ?1\n  AND id IN (/*SLICE:ids*/?2) -- :if $2"
+		gotQuery, gotArgs := dbsqlite.DynamicSQL(query, []any{"active", dbsqlite.NilableSlice([]int64{})})
 
 		assertSQL(t, gotQuery, "SELECT * FROM t\nWHERE name = $1")
 		if !slices.Equal(gotArgs, []any{"active"}) {

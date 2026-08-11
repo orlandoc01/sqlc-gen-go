@@ -156,7 +156,13 @@ When a parameter is marked with `:if`, the generated code:
 - Adds a `bool` field for flag-only parameters (e.g. ORDER BY toggles that appear only in `:if` annotations, not as `col = $N` predicate values)
 - Calls the generated `DynamicSQL()` helper at runtime to strip inactive lines and renumber placeholders
 
-A `:if`-gated parameter is *inactive* (clause skipped) when it is a nil pointer, a `false` bool, or a nil **or empty** slice — "no values supplied" always means "don't filter".
+A `:if`-gated parameter is *inactive* (clause skipped) when it is a nil pointer, a `false` bool, or a **nil** slice. An empty non-nil slice keeps the clause and renders `NULL` (matching zero rows): nil means "no filter requested", empty means "filter by the empty set" — the fail-closed default for computed lists such as permission scopes. When empty should mean "don't filter", wrap the argument in the generated `NilableSlice` helper, which converts empty to nil:
+
+```go
+users, err := q.SearchUsersByIDs(ctx, db, db.SearchUsersByIDsParams{
+    Ids: db.NilableSlice(ids), // empty → nil → clause skipped
+})
+```
 
 ```yaml
 options:
@@ -171,7 +177,7 @@ options:
 | `sqlite` | numbered `?N` or `$N` | `$N` (bound positionally by SQLite) |
 | `mysql` | bare `?`, numbered by appearance | `?` (selected by the engine alone; `sql_driver` is not required) |
 
-**`sqlc.slice()` in dynamic queries** — `/*SLICE:name*/` markers are numbered at generation time and expanded at `Build` time into one placeholder per element (the expansion is reused when the same slice parameter appears more than once on numbered-placeholder engines). A nil or empty slice renders `NULL`, matching sqlc's non-dynamic expansion — and when the slice is itself the `:if` condition, nil and empty both skip the clause entirely.
+**`sqlc.slice()` in dynamic queries** — `/*SLICE:name*/` markers are numbered at generation time and expanded at `Build` time into one placeholder per element (the expansion is reused when the same slice parameter appears more than once on numbered-placeholder engines). A nil or empty slice renders `NULL`, matching sqlc's non-dynamic expansion — and when the slice is itself the `:if` condition, nil skips the clause entirely while empty keeps it (see above).
 
 **SQL annotations**
 
@@ -319,11 +325,11 @@ cd example
 go test ./test/... -v
 ```
 
-**81 passing test cases** across:
+**82 passing test cases** across:
 
 | Test | Sub-tests | What is covered |
 |---|---|---|
-| `TestDynamicSQL` | 29 | Placeholder remapping, gap handling, ORDER BY clauses, orphaned WHERE/GROUP BY/HAVING cleanup, EXISTS blocks, empty-slice gating |
+| `TestDynamicSQL` | 30 | Placeholder remapping, gap handling, ORDER BY clauses, orphaned WHERE/GROUP BY/HAVING cleanup, EXISTS blocks, empty-slice gating, `NilableSlice` |
 | `TestDynamicSQL_LexicalContext` | 16 | Markers inside string literals (incl. dollar-quoted, `E'…'`, backslash-escaped, multi-line), quoted identifiers, nested comments |
 | `TestDynamicSQLSlices` | 7 | `sqlc.slice()` expansion, repeated and empty slices, slice-marker edge cases across all three engines |
 | `TestSearchUsers` | 9 | Optional email/phone/date filter combinations on generated search query |
