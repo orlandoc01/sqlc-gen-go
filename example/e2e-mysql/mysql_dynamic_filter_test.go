@@ -72,12 +72,22 @@ func TestDynamicFilter(t *testing.T) {
 		t.Errorf("ids filter: got %v, want [2]", ids)
 	}
 
-	// empty slice → "no values supplied" → clause skipped, same as nil
+	// empty non-nil slice → condition active → IN (NULL) → zero rows
 	ids, err = q.SearchFilterItems(ctx, dbmysql.SearchFilterItemsParams{Kind: "widget", Ids: []int64{}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(ids) != 0 {
+		t.Errorf("empty ids: got %v, want 0 rows (filter by empty set)", ids)
+	}
+
+	// NilableSlice(empty) → nil → clause skipped for callers who want
+	// empty to mean "don't filter"
+	ids, err = q.SearchFilterItems(ctx, dbmysql.SearchFilterItemsParams{Kind: "widget", Ids: dbmysql.NilableSlice([]int64{})})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ids) != 2 {
-		t.Errorf("empty ids: got %v, want 2 rows (clause skipped)", ids)
+		t.Errorf("NilableSlice(empty) ids: got %v, want 2 rows (clause skipped)", ids)
 	}
 }

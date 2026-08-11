@@ -695,13 +695,24 @@ func CompileDynSQL(annotatedSQL string) *DynSQL {
 // For each annotated line, it checks args[N-1] (N is 1-based, matching $N):
 //   - nil pointer → skip the line
 //   - false bool  → skip the line
-//   - nil or empty slice → skip the line
+//   - nil slice   → skip the line (an empty non-nil slice keeps it and
+//     renders NULL, matching zero rows; see NilableSlice)
 //   - otherwise   → keep the line
 //
 // After filtering, remaining placeholders are renumbered sequentially and
 // the args slice is trimmed to match, so the query is always valid.
 func DynamicSQL(query string, args []any) (string, []any) {
 	return dynCompile(query).Build(args)
+}
+
+// NilableSlice converts an empty slice to nil so a :if-gated slice condition
+// is skipped ("don't filter") instead of kept (IN (NULL), matching zero
+// rows). Use it at the call site when "no values supplied" means "no filter".
+func NilableSlice[T any](s []T) []T {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
 }
 
 // dynParseInt parses a non-negative integer from s[0:length] without allocations.
@@ -762,8 +773,10 @@ func dynArgActive(arg any) bool {
 	case reflect.Ptr, reflect.Interface:
 		return !v.IsNil()
 	case reflect.Slice:
-		// Empty means "no values supplied": skip the clause, same as nil.
-		return v.Len() > 0
+		// Only nil skips: an empty non-nil slice keeps the clause and renders
+		// NULL (matches zero rows), preserving the nil/empty distinction.
+		// Wrap the arg in NilableSlice when empty should mean "don't filter".
+		return !v.IsNil()
 	default:
 		return true
 	}

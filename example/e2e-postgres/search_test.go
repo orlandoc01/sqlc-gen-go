@@ -370,8 +370,8 @@ func TestSearchUsersByIDs(t *testing.T) {
 		}
 	})
 
-	t.Run("EmptySlice_SkipsCondition", func(t *testing.T) {
-		// empty slice → "no values supplied" → clause skipped, same as nil
+	t.Run("EmptySlice_MatchesNothing", func(t *testing.T) {
+		// empty non-nil slice → condition active → IN (NULL) → zero rows
 		users, err := q.SearchUsersByIDs(ctx, conn, dbpostgres.SearchUsersByIDsParams{
 			Name: "alice",
 			Ids:  []int64{},
@@ -379,8 +379,23 @@ func TestSearchUsersByIDs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if len(users) != 0 {
+			t.Errorf("got %d users, want 0 for empty id list (filter by empty set)", len(users))
+		}
+	})
+
+	t.Run("NilableSlice_EmptySkipsCondition", func(t *testing.T) {
+		// NilableSlice turns empty into nil for callers who want empty to
+		// mean "don't filter"
+		users, err := q.SearchUsersByIDs(ctx, conn, dbpostgres.SearchUsersByIDsParams{
+			Name: "alice",
+			Ids:  dbpostgres.NilableSlice([]int64{}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(users) != 2 {
-			t.Errorf("got %d users, want 2 for empty id list (clause skipped)", len(users))
+			t.Errorf("got %d users, want 2 for NilableSlice(empty) (clause skipped)", len(users))
 		}
 	})
 
